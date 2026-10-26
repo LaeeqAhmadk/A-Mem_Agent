@@ -1,273 +1,314 @@
+
+import json
 import unittest
+from unittest.mock import MagicMock, patch
+
 from agentic_memory.memory_system import AgenticMemorySystem, MemoryNote
-from datetime import datetime
+
 
 class TestAgenticMemorySystem(unittest.TestCase):
-    def setUp(self):
-        """Set up test environment before each test."""
-        self.memory_system = AgenticMemorySystem(
-            model_name='all-MiniLM-L6-v2',
-            llm_backend="groq",
-            llm_model="llama-3.1-8b-instant"
-        )
-        
-    def test_create_memory(self):
-        """Test creating a new memory with complete metadata."""
-        content = "Test memory content"
-        tags = ["test", "memory"]
-        keywords = ["test", "content"]
-        links = ["link1", "link2"]
-        context = "Test context"
-        category = "Test category"
-        timestamp = datetime.now().strftime("%Y%m%d%H%M")
-        
-        memory_id = self.memory_system.add_note(
-            content=content,
-            tags=tags,
-            keywords=keywords,
-            links=links,
-            context=context,
-            category=category,
-            timestamp=timestamp
-        )
-        
-        # Verify memory was created
-        self.assertIsNotNone(memory_id)
-        memory = self.memory_system.read(memory_id)
-        self.assertIsNotNone(memory)
-        self.assertEqual(memory.content, content)
-        self.assertEqual(memory.tags, tags)
-        self.assertEqual(memory.keywords, keywords)
-        self.assertEqual(memory.links, links)
-        self.assertEqual(memory.context, context)
-        self.assertEqual(memory.category, category)
-        self.assertEqual(memory.timestamp, timestamp)
-        
-    def test_memory_metadata_persistence(self):
-        """Test that memory metadata persists through ChromaDB storage and retrieval."""
-        # Create a memory with complex metadata
-        content = "Complex test memory"
-        tags = ["test", "complex", "metadata"]
-        keywords = ["test", "complex", "keywords"]
-        links = ["link1", "link2", "link3"]
-        context = "Complex test context"
-        category = "Complex test category"
-        timestamp = datetime.now().strftime("%Y%m%d%H%M")
-        evolution_history = ["evolution1", "evolution2"]
-        
-        memory_id = self.memory_system.add_note(
-            content=content,
-            tags=tags,
-            keywords=keywords,
-            links=links,
-            context=context,
-            category=category,
-            timestamp=timestamp,
-            evolution_history=evolution_history
-        )
-        
-        # Search for the memory using ChromaDB
-        results = self.memory_system.search_agentic(content, k=1)
-        self.assertGreater(len(results), 0)
-        
-        # Verify metadata in search results
-        result = results[0]
-        self.assertEqual(result['content'], content)
-        self.assertEqual(result['tags'], tags)
-        self.assertEqual(result['keywords'], keywords)
-        self.assertEqual(result['context'], context)
-        self.assertEqual(result['category'], category)
-        
-    def test_memory_update(self):
-        """Test updating memory metadata through ChromaDB."""
-        # Create initial memory
-        content = "Initial content"
-        memory_id = self.memory_system.add_note(content=content)
-        
-        # Update memory with new metadata
-        new_content = "Updated content"
-        new_tags = ["updated", "tags"]
-        new_keywords = ["updated", "keywords"]
-        new_context = "Updated context"
-        
-        success = self.memory_system.update(
-            memory_id,
-            content=new_content,
-            tags=new_tags,
-            keywords=new_keywords,
-            context=new_context
-        )
-        
-        self.assertTrue(success)
-        
-        # Verify updates in ChromaDB
-        results = self.memory_system.search_agentic(new_content, k=1)
-        self.assertGreater(len(results), 0)
-        result = results[0]
-        self.assertEqual(result['content'], new_content)
-        self.assertEqual(result['tags'], new_tags)
-        self.assertEqual(result['keywords'], new_keywords)
-        self.assertEqual(result['context'], new_context)
-        
-    def test_memory_relationships(self):
-        """Test memory relationships and linked memories."""
-        # Create related memories
-        content1 = "First memory"
-        content2 = "Second memory"
-        content3 = "Third memory"
-        
-        id1 = self.memory_system.add_note(content1)
-        id2 = self.memory_system.add_note(content2)
-        id3 = self.memory_system.add_note(content3)
-        
-        # Add relationships
-        memory1 = self.memory_system.read(id1)
-        memory2 = self.memory_system.read(id2)
-        memory3 = self.memory_system.read(id3)
-        
-        memory1.links.append(id2)
-        memory2.links.append(id1)
-        memory2.links.append(id3)
-        memory3.links.append(id2)
-        
-        # Update memories with relationships
-        self.memory_system.update(id1, links=memory1.links)
-        self.memory_system.update(id2, links=memory2.links)
-        self.memory_system.update(id3, links=memory3.links)
-        
-        # Test relationship retrieval
-        results = self.memory_system.search_agentic(content1, k=3)
-        self.assertGreater(len(results), 0)
-        
-        # Verify relationships are maintained
-        memory1_updated = self.memory_system.read(id1)
-        self.assertIn(id2, memory1_updated.links)
-        
-    def test_memory_evolution(self):
-        """Test memory evolution system with ChromaDB."""
-        # Create related memories
-        contents = [
-            "Deep learning neural networks",
-            "Neural network architectures",
-            "Training deep neural networks"
-        ]
-        
-        memory_ids = []
-        for content in contents:
-            memory_id = self.memory_system.add_note(content)
-            memory_ids.append(memory_id)
-            
-        # Verify that memories have been properly evolved
-        for memory_id in memory_ids:
-            memory = self.memory_system.read(memory_id)
-            self.assertIsNotNone(memory.tags)
-            self.assertIsNotNone(memory.context)
-            self.assertIsNotNone(memory.keywords)
-            
-        # Test evolution through search
-        results = self.memory_system.search_agentic("neural networks", k=3)
-        self.assertGreater(len(results), 0)
-        
-        # Verify evolution metadata
-        for result in results:
-            self.assertIsNotNone(result['tags'])
-            self.assertIsNotNone(result['context'])
-            self.assertIsNotNone(result['keywords'])
-            
-    def test_memory_deletion(self):
-        """Test memory deletion from ChromaDB."""
-        # Create and delete a memory
-        content = "Memory to delete"
-        memory_id = self.memory_system.add_note(content)
-        
-        # Verify memory exists
-        memory = self.memory_system.read(memory_id)
-        self.assertIsNotNone(memory)
-        
-        # Delete memory
-        success = self.memory_system.delete(memory_id)
-        self.assertTrue(success)
-        
-        # Verify deletion
-        memory = self.memory_system.read(memory_id)
-        self.assertIsNone(memory)
-        
-        # Verify memory is removed from ChromaDB
-        results = self.memory_system.search_agentic(content, k=1)
-        self.assertEqual(len(results), 0)
-        
-    def test_memory_consolidation(self):
-        """Test memory consolidation with ChromaDB."""
-        # Create multiple memories
-        contents = [
-            "Memory 1",
-            "Memory 2",
-            "Memory 3"
-        ]
-        
-        for content in contents:
-            self.memory_system.add_note(content)
-            
-        # Force consolidation
-        self.memory_system.consolidate_memories()
-        
-        # Verify memories are still accessible
-        for content in contents:
-            results = self.memory_system.search_agentic(content, k=1)
-            self.assertGreater(len(results), 0)
-            self.assertEqual(results[0]['content'], content)
-            
-    def test_find_related_memories(self):
-        """Test finding related memories."""
-        # Create test memories
-        contents = [
-            "Python programming language",
-            "Python data science",
-            "Machine learning with Python",
-            "Web development with JavaScript"
-        ]
-        
-        for content in contents:
-            self.memory_system.add_note(content)
-            
-        # Test finding related memories
-        results = self.memory_system.find_related_memories("Python", k=2)
-        self.assertGreater(len(results), 0)
-        
-    def test_find_related_memories_raw(self):
-        """Test finding related memories with raw format."""
-        # Create test memories
-        contents = [
-            "Python programming language",
-            "Python data science",
-            "Machine learning with Python"
-        ]
-        
-        for content in contents:
-            self.memory_system.add_note(content)
-            
-        # Test finding related memories in raw format
-        results = self.memory_system.find_related_memories_raw("Python", k=2)
-        self.assertIsNotNone(results)
-        
-    def test_process_memory(self):
-        """Test memory processing and evolution."""
-        # Create a test memory
-        content = "Test memory for processing"
-        memory_id = self.memory_system.add_note(content)
-        
-        # Get the memory
-        memory = self.memory_system.read(memory_id)
-        
-        # Process the memory
-        should_evolve, processed_memory = self.memory_system.process_memory(memory)
-        
-        # Verify processing results
-        self.assertIsInstance(should_evolve, bool)
-        self.assertIsInstance(processed_memory, MemoryNote)
-        self.assertIsNotNone(processed_memory.tags)
-        self.assertIsNotNone(processed_memory.context)
-        self.assertIsNotNone(processed_memory.keywords)
 
-if __name__ == '__main__':
-    unittest.main()
+    def setUp(self):
+        """Create a fresh memory system with a mocked LLM."""
+        self.llm_controller = MagicMock()
+        self.llm_controller.llm.get_completion.side_effect = (
+            self.fake_llm_completion
+        )
+
+        # Replace the real LLM controller before creating the system.
+        self.llm_patcher = patch(
+            "agentic_memory.memory_system.LLMController",
+            return_value=self.llm_controller,
+        )
+        self.llm_patcher.start()
+        self.addCleanup(self.llm_patcher.stop)
+
+        self.memory_system = AgenticMemorySystem(
+            model_name="all-MiniLM-L6-v2",
+            llm_backend="groq",
+            llm_model="llama-3.1-8b-instant",
+        )
+
+    def fake_llm_completion(self, prompt, *args, **kwargs):
+        """
+        Return predictable JSON instead of calling Groq.
+        The same mock handles metadata analysis and evolution decisions.
+        """
+        prompt_lower = str(prompt).lower()
+
+        if "should_evolve" in prompt_lower or "evolve" in prompt_lower:
+            response = {
+                "should_evolve": False,
+                "reason": "No evolution needed for this test.",
+                "updated_tags": [],
+                "new_links": [],
+            }
+        else:
+            response = {
+                "keywords": ["AI", "memory", "testing"],
+                "context": "Software Development",
+                "tags": ["AI", "Testing"],
+            }
+
+        return json.dumps(response)
+
+    def add_test_note(self, content, **kwargs):
+        """Add a note and retrieve the stored MemoryNote."""
+        self.memory_system.add_note(content, **kwargs)
+
+        for note in self.memory_system.memories.values():
+            if note.content == content:
+                return note
+
+        self.fail(f"Memory was not stored: {content}")
+
+    def test_create_memory_with_metadata(self):
+        """A memory should be stored with the supplied metadata."""
+        note = self.add_test_note(
+            "Artificial intelligence can solve complex problems.",
+            keywords=["AI", "problem solving"],
+            context="Research",
+            tags=["AI", "Research"],
+            category="Technology",
+        )
+
+        self.assertIsInstance(note, MemoryNote)
+        self.assertEqual(
+            note.content,
+            "Artificial intelligence can solve complex problems.",
+        )
+        self.assertEqual(note.keywords, ["AI", "problem solving"])
+        self.assertEqual(note.context, "Research")
+        self.assertEqual(note.tags, ["AI", "Research"])
+        self.assertEqual(note.category, "Technology")
+        self.assertIsNotNone(note.id)
+
+    def test_missing_metadata_is_generated_without_groq(self):
+        """Missing metadata should be supplied by the mocked LLM."""
+        note = self.add_test_note(
+            "Machine learning is a branch of artificial intelligence."
+        )
+
+        self.assertTrue(note.keywords)
+        self.assertEqual(note.context, "Software Development")
+        self.assertTrue(note.tags)
+
+        # Confirm the mock, rather than a live Groq request, was used.
+        self.llm_controller.llm.get_completion.assert_called()
+
+    def test_memory_is_saved_in_chromadb(self):
+        """The stored memory should be retrievable through semantic search."""
+        content = "ChromaDB stores vector embeddings for semantic search."
+        note = self.add_test_note(
+            content,
+            keywords=["ChromaDB", "vectors"],
+            context="Database",
+            tags=["Vector Search"],
+        )
+
+        result = self.memory_system.find_related_memories(
+            "ChromaDB vector embeddings",
+            k=5,
+        )
+
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+
+        _, memory_ids = result
+        self.assertIn(note.id, memory_ids)
+
+    def test_update_memory(self):
+        """Updating a memory should change its stored attributes."""
+        note = self.add_test_note(
+            "This is an original memory.",
+            keywords=["original"],
+            context="General",
+            tags=["old"],
+        )
+
+        success = self.memory_system.update(
+            note.id,
+            content="This is an updated memory.",
+            context="Updated Context",
+            keywords=["updated"],
+            tags=["new"],
+        )
+
+        self.assertTrue(success)
+
+        updated_note = self.memory_system.read(note.id)
+        self.assertIsNotNone(updated_note)
+        self.assertEqual(updated_note.content, "This is an updated memory.")
+        self.assertEqual(updated_note.context, "Updated Context")
+        self.assertEqual(updated_note.keywords, ["updated"])
+        self.assertEqual(updated_note.tags, ["new"])
+
+    def test_read_existing_memory(self):
+        """Reading an existing ID should return its MemoryNote."""
+        note = self.add_test_note(
+            "A memory that can be read.",
+            keywords=["read"],
+            context="Testing",
+            tags=["read-test"],
+        )
+
+        result = self.memory_system.read(note.id)
+
+        self.assertIsInstance(result, MemoryNote)
+        self.assertEqual(result.id, note.id)
+        self.assertEqual(result.content, note.content)
+
+    def test_read_missing_memory(self):
+        """Reading an unknown ID should return None."""
+        result = self.memory_system.read("nonexistent-memory-id")
+        self.assertIsNone(result)
+
+    def test_delete_memory(self):
+        """Deleting a memory should remove it from the system."""
+        note = self.add_test_note(
+            "This memory will be deleted.",
+            keywords=["delete"],
+            context="Testing",
+            tags=["delete-test"],
+        )
+
+        success = self.memory_system.delete(note.id)
+
+        self.assertTrue(success)
+        self.assertIsNone(self.memory_system.read(note.id))
+        self.assertNotIn(note.id, self.memory_system.memories)
+
+    def test_delete_missing_memory(self):
+        """Deleting an unknown ID should fail gracefully."""
+        success = self.memory_system.delete("nonexistent-memory-id")
+        self.assertFalse(success)
+
+    def test_find_related_memories(self):
+        """Related-memory search should return text and IDs."""
+        note = self.add_test_note(
+            "Deep learning uses neural networks to learn patterns.",
+            keywords=["deep learning", "neural networks"],
+            context="Artificial Intelligence",
+            tags=["Deep Learning"],
+        )
+
+        result = self.memory_system.find_related_memories(
+            "neural networks and deep learning",
+            k=5,
+        )
+
+        self.assertIsInstance(result, tuple)
+        memory_text, memory_ids = result
+
+        self.assertIsInstance(memory_text, str)
+        self.assertIsInstance(memory_ids, list)
+        self.assertIn(note.id, memory_ids)
+
+    def test_find_related_memories_raw(self):
+        """The raw retrieval method should return formatted text."""
+        self.add_test_note(
+            "Natural language processing helps computers understand text.",
+            keywords=["NLP", "text"],
+            context="AI",
+            tags=["NLP"],
+        )
+
+        result = self.memory_system.find_related_memories_raw(
+            "natural language processing",
+            k=5,
+        )
+
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.strip())
+
+    def test_process_first_memory(self):
+        """The first memory should not require evolution."""
+        note = MemoryNote(
+            content="This is the first memory.",
+            keywords=["first"],
+            context="Testing",
+            tags=["first-memory"],
+        )
+
+        evolved, processed_note = self.memory_system.process_memory(note)
+
+        self.assertFalse(evolved)
+        self.assertIsInstance(processed_note, MemoryNote)
+
+    def test_process_memory_with_existing_memories(self):
+        """Processing a related memory should return a valid result."""
+        self.add_test_note(
+            "Neural networks are used in deep learning.",
+            keywords=["neural networks"],
+            context="AI",
+            tags=["Deep Learning"],
+        )
+
+        second_note = MemoryNote(
+            content="Deep learning models are trained using data.",
+            keywords=["deep learning", "training"],
+            context="AI",
+            tags=["Deep Learning"],
+        )
+
+        evolved, processed_note = self.memory_system.process_memory(
+            second_note
+        )
+
+        self.assertIsInstance(evolved, bool)
+        self.assertIsInstance(processed_note, MemoryNote)
+
+    def test_memory_relationships(self):
+        """Memory links should be updateable and remain accessible."""
+        first = self.add_test_note(
+            "Python is used for machine learning.",
+            keywords=["Python", "ML"],
+            context="Programming",
+            tags=["Python"],
+        )
+
+        second = self.add_test_note(
+            "Scikit-learn provides machine learning algorithms.",
+            keywords=["Scikit-learn", "ML"],
+            context="Programming",
+            tags=["Machine Learning"],
+        )
+
+        first.links = [second.id]
+        success = self.memory_system.update(first.id, links=first.links)
+
+        self.assertTrue(success)
+
+        updated_first = self.memory_system.read(first.id)
+        self.assertIn(second.id, updated_first.links)
+
+    def test_consolidate_memories(self):
+        """Consolidation should preserve the notes in system memory."""
+        first = self.add_test_note(
+            "Computer vision analyzes images.",
+            keywords=["computer vision", "images"],
+            context="AI",
+            tags=["CV"],
+        )
+
+        second = self.add_test_note(
+            "Image classification is a computer vision task.",
+            keywords=["classification", "images"],
+            context="AI",
+            tags=["CV"],
+        )
+
+        self.memory_system.consolidate_memories()
+
+        self.assertIn(first.id, self.memory_system.memories)
+        self.assertIn(second.id, self.memory_system.memories)
+
+    def test_llm_controller_is_mocked(self):
+        """The tests must not depend on a live LLM API."""
+        self.add_test_note("Verify that the LLM mock is active.")
+
+        self.llm_controller.llm.get_completion.assert_called()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

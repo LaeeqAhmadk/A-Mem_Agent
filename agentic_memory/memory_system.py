@@ -16,7 +16,6 @@ from transformers import AutoModel, AutoTokenizer
 from nltk.tokenize import word_tokenize
 import pickle
 from pathlib import Path
-from litellm import completion
 import time
 
 logger = logging.getLogger(__name__)
