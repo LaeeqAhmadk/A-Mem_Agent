@@ -111,7 +111,7 @@ class GroqController(BaseLLMController):
 
     def __init__(
         self,
-        model: str = "llama-3.1-8b-instant",
+        model: str = "openai/gpt-oss-20b",
         api_key: Optional[str] = None,
         max_retries: int = 4,
         min_interval: float = 2.0,
@@ -671,7 +671,7 @@ class LLMController:
     Or explicitly:
         controller = LLMController(
             backend="groq",
-            model="llama-3.1-8b-instant"
+            model="openai/gpt-oss-20b"
         )
     """
 
@@ -684,7 +684,7 @@ class LLMController:
             "sglang",
             "openrouter",
         ] = "groq",
-        model: str = "llama-3.1-8b-instant",
+        model: str = "openai/gpt-oss-20b",
         api_key: Optional[str] = None,
         sglang_host: str = "http://localhost",
         sglang_port: int = 30000,
