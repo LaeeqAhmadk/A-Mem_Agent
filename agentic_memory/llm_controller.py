@@ -2,7 +2,7 @@
 LLM controllers for A-Mem.
 
 Primary backend:
-    Groq API with Llama 3.1 8B Instant
+    Groq API using direct HTTP requests.
 
 Other optional backends:
     OpenAI, Ollama, SGLang, and OpenRouter
@@ -10,8 +10,11 @@ Other optional backends:
 For the current implementation, set:
     GROQ_API_KEY=your_groq_api_key
 
-Install the main dependencies:
-    pip install openai litellm requests python-dotenv
+Main dependencies:
+    pip install requests python-dotenv
+
+Optional dependencies:
+    pip install openai ollama litellm
 """
 
 from typing import Dict, Optional, Literal, Any
@@ -90,24 +93,23 @@ class BaseLLMController(ABC):
         return result
 
 
+
 # ============================================================
 # Groq Controller
 # ============================================================
 
 class GroqController(BaseLLMController):
     """
-    LLM controller using the Groq API.
+    LLM controller using the Groq API through direct HTTP requests.
 
-    The default model is Llama 3.1 8B Instant.
+    This implementation does not depend on the OpenAI Python SDK
+    or its compiled jiter extension.
 
     API key:
         Read from GROQ_API_KEY environment variable.
-
-    Groq uses an OpenAI-compatible API, so the OpenAI Python
-    package can be used with Groq's base URL.
     """
 
-    BASE_URL = "https://api.groq.com/openai/v1"
+    BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     def __init__(
         self,
@@ -116,15 +118,6 @@ class GroqController(BaseLLMController):
         max_retries: int = 4,
         min_interval: float = 2.0,
     ):
-        try:
-            from openai import OpenAI
-        except ImportError as exc:
-            raise ImportError(
-                "The OpenAI Python package is required for Groq's "
-                "OpenAI-compatible API. Install it using:\n"
-                "pip install openai"
-            ) from exc
-
         if api_key is None:
             api_key = os.getenv("GROQ_API_KEY")
 
@@ -135,20 +128,20 @@ class GroqController(BaseLLMController):
             )
 
         self.model = model
+        self.api_key = api_key
         self.max_retries = max(1, max_retries)
         self.min_interval = max(0.0, min_interval)
         self._last_call = 0.0
 
-        # Disable automatic SDK retries because we handle retries
-        # ourselves, including rate-limit delays.
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url=self.BASE_URL,
-            max_retries=0,
-        )
+        self.session = requests.Session()
+
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
 
     def _throttle(self):
-        """Add a small delay between requests."""
+        """Add a small delay between API requests."""
 
         elapsed = time.time() - self._last_call
         wait = self.min_interval - elapsed
@@ -174,7 +167,6 @@ class GroqController(BaseLLMController):
 
         text = text.strip()
 
-        # First, try parsing the complete response.
         try:
             parsed = json.loads(text)
 
@@ -184,7 +176,6 @@ class GroqController(BaseLLMController):
         except json.JSONDecodeError:
             pass
 
-        # Remove Markdown code fences if present.
         text = re.sub(
             r"^\s*```(?:json)?\s*|\s*```\s*$",
             "",
@@ -201,7 +192,6 @@ class GroqController(BaseLLMController):
         except json.JSONDecodeError:
             pass
 
-        # Try extracting the outermost JSON object.
         start = text.find("{")
         end = text.rfind("}")
 
@@ -225,21 +215,11 @@ class GroqController(BaseLLMController):
         max_tokens: int = 2048,
     ) -> str:
         """
-        Generate a JSON completion using Groq.
+        Generate a JSON completion using the Groq REST API.
 
         A-Mem uses structured information for memory creation,
-        memory linking, and memory evolution. Therefore, this
-        controller asks the model to return valid JSON.
+        memory linking, and memory evolution.
         """
-
-        from openai import (
-            RateLimitError,
-            APIConnectionError,
-            APITimeoutError,
-            InternalServerError,
-            AuthenticationError,
-            BadRequestError,
-        )
 
         schema = (
             (response_format or {})
@@ -261,10 +241,12 @@ class GroqController(BaseLLMController):
                 + json.dumps(schema, ensure_ascii=False)
             )
 
-        # Ask Groq for JSON mode. The schema is also included in
-        # the system message because JSON mode does not guarantee
-        # that every schema rule will be followed.
-        kwargs = {
+        # LLMController may explicitly pass None.
+        # Use a safe default instead of sending null to Groq.
+        if max_tokens is None:
+            max_tokens = 2048
+
+        payload = {
             "model": self.model,
             "messages": [
                 {
@@ -276,7 +258,9 @@ class GroqController(BaseLLMController):
                     "content": prompt,
                 },
             ],
-            "response_format": {"type": "json_object"},
+            "response_format": {
+                "type": "json_object"
+            },
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
@@ -284,24 +268,94 @@ class GroqController(BaseLLMController):
         last_error = None
 
         for attempt in range(1, self.max_retries + 1):
+
             self._throttle()
 
             try:
-                response = self.client.chat.completions.create(
-                    **kwargs
+                response = self.session.post(
+                    self.BASE_URL,
+                    headers=self.headers,
+                    json=payload,
+                    timeout=(15, 120),
                 )
 
-                content = response.choices[0].message.content or ""
+                # Handle rate limits.
+                if response.status_code == 429:
+
+                    last_error = RuntimeError(
+                        f"Groq rate limit: {response.text[:500]}"
+                    )
+
+                    retry_after = response.headers.get("retry-after")
+
+                    try:
+                        delay = float(retry_after)
+                    except (TypeError, ValueError):
+                        delay = min(2 ** attempt, 30)
+
+                    print(
+                        f"[Groq] Rate limit reached. "
+                        f"Waiting {delay:.1f} seconds."
+                    )
+
+                    if attempt < self.max_retries:
+                        time.sleep(delay)
+
+                    continue
+
+                # Handle invalid requests and authentication errors.
+                if response.status_code in (400, 401, 403, 404):
+
+                    raise RuntimeError(
+                        f"Groq rejected the request "
+                        f"(HTTP {response.status_code}): "
+                        f"{response.text[:1000]}. "
+                        "Check your API key, model name, and request."
+                    )
+
+                # Handle temporary Groq server errors.
+                if response.status_code >= 500:
+
+                    last_error = RuntimeError(
+                        f"Groq server error: HTTP "
+                        f"{response.status_code}: "
+                        f"{response.text[:500]}"
+                    )
+
+                    delay = min(2 ** attempt, 20)
+
+                    print(
+                        f"[Groq] Server error. "
+                        f"Retrying in {delay} seconds."
+                    )
+
+                    if attempt < self.max_retries:
+                        time.sleep(delay)
+
+                    continue
+
+                response.raise_for_status()
+
+                result = response.json()
+
+                content = (
+                    result.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content") or ""
+                )
+
                 parsed = self._extract_json(content)
 
                 if parsed is not None:
+
                     return json.dumps(
                         parsed,
                         ensure_ascii=False,
                     )
 
                 last_error = ValueError(
-                    "The model response was not a valid JSON object."
+                    "The model response was not a valid JSON object. "
+                    f"Response: {str(result)[:1000]}"
                 )
 
                 print(
@@ -309,57 +363,24 @@ class GroqController(BaseLLMController):
                     f"({attempt}/{self.max_retries})."
                 )
 
-            except RateLimitError as exc:
-                last_error = exc
+            except requests.exceptions.RequestException as exc:
 
-                retry_after = None
-
-                try:
-                    retry_after = float(
-                        exc.response.headers.get("retry-after")
-                    )
-                except (AttributeError, TypeError, ValueError):
-                    pass
-
-                delay = (
-                    retry_after
-                    if retry_after is not None
-                    else min(2 ** attempt, 30)
-                )
-
-                print(
-                    f"[Groq] Rate limit reached. "
-                    f"Waiting {delay:.1f} seconds before retry."
-                )
-
-                if attempt < self.max_retries:
-                    time.sleep(delay)
-
-            except (
-                APIConnectionError,
-                APITimeoutError,
-                InternalServerError,
-            ) as exc:
                 last_error = exc
                 delay = min(2 ** attempt, 20)
 
                 print(
-                    f"[Groq] Temporary connection/server error: {exc}. "
+                    f"[Groq] Connection error: {exc}. "
                     f"Retrying in {delay} seconds."
                 )
 
                 if attempt < self.max_retries:
                     time.sleep(delay)
 
-            except (AuthenticationError, BadRequestError) as exc:
-                # These usually indicate an invalid API key,
-                # unsupported model, or invalid request.
-                raise RuntimeError(
-                    f"Groq rejected the request: {exc}. "
-                    "Check your API key, model name, and request."
-                ) from exc
+            except RuntimeError:
+                raise
 
             except Exception as exc:
+
                 last_error = exc
 
                 print(
@@ -370,8 +391,6 @@ class GroqController(BaseLLMController):
                 if attempt < self.max_retries:
                     time.sleep(min(2 ** attempt, 10))
 
-        # Do not silently pretend that the LLM succeeded.
-        # Raise a clear error so we can diagnose the problem.
         raise RuntimeError(
             "Groq failed to generate a valid JSON response after "
             f"{self.max_retries} attempts. Last error: {last_error}"

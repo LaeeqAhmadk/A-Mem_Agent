@@ -1,10 +1,9 @@
-
 from typing import Dict, Any, List
 import json
 import logging
-
+from pathlib import Path
 import chromadb
-from chromadb.config import Settings
+
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
 logger = logging.getLogger(__name__)
@@ -85,7 +84,9 @@ class ChromaRetriever:
         model_name: str = "all-MiniLM-L6-v2",
     ):
         """Initialize ChromaDB with a local embedding model."""
-        self.client = chromadb.Client(Settings(allow_reset=True))
+        db_path = Path(__file__).resolve().parent.parent / "chroma_db"
+        db_path.mkdir(parents=True, exist_ok=True)
+        self.client = chromadb.PersistentClient(path=str(db_path))
 
         self.embedding_function = SentenceTransformerEmbeddingFunction(
             model_name=model_name,
@@ -171,5 +172,19 @@ class ChromaRetriever:
                             query_metadata[index] = _restore_metadata(
                                 metadata
                             )
+
+        return results
+    
+    def get_all_documents(self) -> Dict[str, Any]:
+        """Retrieve all stored memories from the persistent ChromaDB collection."""
+        results = self.collection.get(
+            include=["documents", "metadatas"]
+        )
+
+        if results.get("metadatas"):
+            results["metadatas"] = [
+                _restore_metadata(metadata) if metadata else {}
+                for metadata in results["metadatas"]
+            ]
 
         return results

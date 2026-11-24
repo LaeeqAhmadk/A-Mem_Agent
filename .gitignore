@@ -3,3 +3,15 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Temporary Python environment
+.venv_grpc_test/
+
+# VS Code workspace settings
+.vscode/
+
+# Local ChromaDB persistent database
+chroma_db/
+
+# Backup files
+*.backup

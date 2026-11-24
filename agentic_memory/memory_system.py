@@ -84,6 +84,8 @@ class AgenticMemorySystem:
             collection_name="memories",
             model_name=self.model_name,
         )
+        # Restore previously saved memories from persistent ChromaDB.
+        self._load_existing_memories()
 
         # Initialize the selected LLM backend.
         self.llm_controller = LLMController(
@@ -131,6 +133,53 @@ Use only the supplied memory IDs. Keep the neighborhood arrays aligned
 with the order of the supplied neighbors. Do not invent memory IDs.
 """
 
+    
+    def _load_existing_memories(self) -> None:
+        """Restore MemoryNote objects from the persistent ChromaDB collection."""
+        try:
+            results = self.retriever.get_all_documents()
+
+            ids = results.get("ids", [])
+            metadatas = results.get("metadatas", [])
+
+            for memory_id, metadata in zip(ids, metadatas):
+                metadata = metadata or {}
+
+                content = metadata.get("content", "")
+
+                if not content:
+                    logger.warning(
+                        "Skipping memory %s because its original content is missing.",
+                        memory_id,
+                    )
+                    continue
+
+                note = MemoryNote(
+                    content=content,
+                    id=memory_id,
+                    keywords=metadata.get("keywords", []),
+                    links=metadata.get("links", []),
+                    retrieval_count=metadata.get("retrieval_count", 0),
+                    timestamp=metadata.get("timestamp"),
+                    last_accessed=metadata.get("last_accessed"),
+                    context=metadata.get("context", "General"),
+                    evolution_history=metadata.get("evolution_history", []),
+                    category=metadata.get("category", "Uncategorized"),
+                    tags=metadata.get("tags", []),
+                )
+
+                self.memories[memory_id] = note
+
+            logger.info(
+                "Restored %d memories from persistent ChromaDB.",
+                len(self.memories),
+            )
+
+            print(f"Restored {len(self.memories)} existing memories.")
+
+        except Exception:
+            logger.exception("Failed to restore memories from ChromaDB.")
+            raise
     @staticmethod
     def _to_bool(value: Any) -> bool:
         """Convert a Boolean-like value returned by an LLM to bool."""
@@ -345,10 +394,28 @@ Content:
                     )
 
         return "\n".join(lines)
+    
+    def _update_memory_access(self, memory: MemoryNote) -> None:
+        """Update and persist memory access statistics."""
+
+        memory.retrieval_count += 1
+        memory.last_accessed = datetime.now().strftime("%Y%m%d%H%M")
+
+        self.retriever.add_document(
+        memory.content,
+        self._metadata_for(memory),
+        memory.id,
+    )
 
     def read(self, memory_id: str) -> Optional[MemoryNote]:
-        """Retrieve a memory by its ID."""
-        return self.memories.get(memory_id)
+        """Retrieve a memory by its ID and update access statistics."""
+
+        memory = self.memories.get(memory_id)
+
+        if memory is not None:
+            self._update_memory_access(memory)
+
+        return memory
 
     def update(self, memory_id: str, **kwargs) -> bool:
         """Update an existing memory and its vector record."""
@@ -403,7 +470,7 @@ Content:
         ]
 
     def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        """Search memories by semantic similarity."""
+        """Search memories by semantic similarity and update access statistics."""
 
         if k <= 0:
             return []
@@ -420,23 +487,26 @@ Content:
 
         for index, memory_id in enumerate(result_ids[0]):
             memory = self.memories.get(memory_id)
+
             if memory is None:
                 continue
 
-            found.append(
-                {
-                    "id": memory_id,
-                    "content": memory.content,
-                    "context": memory.context,
-                    "keywords": memory.keywords,
-                    "tags": memory.tags,
-                    "score": (
-                        distance_values[index]
-                        if index < len(distance_values)
-                        else None
-                    ),
-                }
-            )
+        self._update_memory_access(memory)
+
+        found.append(
+            {
+                "id": memory_id,
+                "content": memory.content,
+                "context": memory.context,
+                "keywords": memory.keywords,
+                "tags": memory.tags,
+                "score": (
+                    distance_values[index]
+                    if index < len(distance_values)
+                    else None
+                ),
+            }
+        )
 
         return found[:k]
 
@@ -444,41 +514,43 @@ Content:
         """Compatibility wrapper for the current semantic search method."""
         return self.search(query, k)
 
+    
     def search_agentic(
         self,
         query: str,
         k: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Search memories and include their linked neighbors."""
+        """Search memories and prioritize their linked neighbors."""
 
         if not self.memories or k <= 0:
             return []
 
         try:
             results = self.retriever.search(query, k)
+
             result_ids = results.get("ids", [[]])
             distances = results.get("distances", [[]])
 
             if not result_ids or not result_ids[0]:
                 return []
 
-            metadata_rows = results.get("metadatas", [[]])
-            metadata_rows = metadata_rows[0] if metadata_rows else []
             distance_values = distances[0] if distances else []
 
             memories = []
             seen_ids = set()
 
             for index, memory_id in enumerate(result_ids[0]):
+
+                if len(memories) >= k:
+                    break
+
                 memory = self.memories.get(memory_id)
+
                 if memory is None or memory_id in seen_ids:
                     continue
 
-                metadata = (
-                    metadata_rows[index]
-                    if index < len(metadata_rows) and metadata_rows[index]
-                    else {}
-                )
+                # Add the primary semantic search result.
+                self._update_memory_access(memory)
 
                 memories.append(
                     {
@@ -497,24 +569,24 @@ Content:
                         ),
                     }
                 )
+
                 seen_ids.add(memory_id)
 
-            # Add linked memories if there is room in the result limit.
-            for item in list(memories):
-                if len(memories) >= k:
-                    break
-
-                memory = self.memories.get(item["id"])
-                if memory is None:
-                    continue
-
+                # Immediately add linked neighbors.
                 for link_id in memory.links:
+
                     if len(memories) >= k:
                         break
 
-                    neighbor = self.memories.get(link_id)
-                    if neighbor is None or link_id in seen_ids:
+                    if link_id in seen_ids:
                         continue
+
+                    neighbor = self.memories.get(link_id)
+
+                    if neighbor is None:
+                        continue
+
+                    self._update_memory_access(neighbor)
 
                     memories.append(
                         {
@@ -528,6 +600,7 @@ Content:
                             "is_neighbor": True,
                         }
                     )
+
                     seen_ids.add(link_id)
 
             return memories[:k]
@@ -535,6 +608,7 @@ Content:
         except Exception:
             logger.exception("Error in search_agentic")
             return []
+
 
     def process_memory(self, note: MemoryNote) -> Tuple[bool, MemoryNote]:
         """Evaluate a memory and optionally update links or neighbors."""
